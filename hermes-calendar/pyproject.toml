@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-calendar"
+version = "0.1.0"
+description = "헤르메스 에이전트용 구글 캘린더 도구: 한국 공휴일, 겹침 경고, 영업일·D-day, 아침 브리핑, 선택 알림"
+requires-python = ">=3.11"
+dependencies = [
+  "google-api-python-client>=2.100",
+  "google-auth-oauthlib>=1.2",
+  "holidays>=0.107",
+  "mcp>=1.2",
+  "tzdata",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+hcal = "hermes_calendar.cli:main"
+hcal-mcp = "hermes_calendar.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hermes_calendar = ["skill/*.md"]
+
+[tool.ruff]
+line-length = 150
