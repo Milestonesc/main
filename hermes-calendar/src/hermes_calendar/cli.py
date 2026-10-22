@@ -8,7 +8,7 @@ from importlib import resources
 from pathlib import Path
 
 from . import config
-from .core import Calendar, UserError
+from .core import STATUSES, Calendar, UserError
 from .days import dday_label, wd
 from .gcal import GCal, NotAuthorized, login
 
@@ -20,21 +20,40 @@ def fmt_event(d: dict) -> str:
     else:
         s, e = datetime.fromisoformat(d["start"]), datetime.fromisoformat(d["end"])
         when = f"{s:%Y-%m-%d}({wd(s.date())}) {s:%H:%M}–{e:%H:%M}"
+    mark = STATUSES[d["status"]][1]
     extra = (f" @{d['location']}" if d["location"] else "")
+    if d["todos"]:
+        extra += f" (할 일 {sum(t['done'] for t in d['todos'])}/{len(d['todos'])})"
     extra += f" ⏰{','.join(str(m) for m in d['remind_minutes'])}분 전" if d["remind_minutes"] else ""
     extra += " 🎯D-day" if d["dday"] else ""
-    return f"{when} {d['title']}{extra}  [id: {d['id']}]"
+    return f"{when} {mark + ' ' if mark else ''}{d['title']}{extra}  [id: {d['id']}]"
+
+
+def fmt_detail(d: dict) -> str:
+    lines = [fmt_event(d), f"상태: {d['status_name']}"]
+    if d["description"]:
+        lines += ["", d["description"]]
+    if d["todos"]:
+        lines += ["", "[할 일]"] + [f"{t['no']}. {'☑' if t['done'] else '☐'} {t['text']}" for t in d["todos"]]
+    for title, key in (("메모", "memos"), ("기록", "history")):
+        if d[key]:
+            lines += ["", f"[{title}]"] + d[key]
+    return "\n".join(lines)
 
 
 def text(result) -> str:
     if isinstance(result, str):
         return result
     lines = []
+    if set(result) == {"event"}:
+        return fmt_detail(result["event"])
+    if result.get("counts"):
+        lines.append(" · ".join(f"{k} {v}" for k, v in result["counts"].items()))
     if "events" in result:
         off = result.get("off_days", {})
         lines += [f"🏖 {k}({wd(date.fromisoformat(k))}) {', '.join(v)}" for k, v in off.items()
                   if set(v) - {"토요일", "일요일"}]
-        lines += [fmt_event(e) for e in result["events"]] or ["일정이 없어요."]
+        lines += [fmt_event(e) for e in result["events"]] or ([] if result.get("message") else ["일정이 없어요."])
     if "date" in result and "off" in result:
         lines.insert(0, f"{result['date']}({result['weekday']}) " +
                      (f"쉬는 날: {', '.join(result['reasons'])}" if result["off"] else "일하는 날"))
@@ -66,7 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
         a.add_argument("--end", help="끝 시각. 종일 일정이면 마지막 날짜(포함)")
         a.add_argument("--minutes", type=int, help="끝 대신 길이(분). 기본 60분")
         a.add_argument("--location")
-        a.add_argument("--memo")
+        a.add_argument("--desc", help="일정 설명(짧은 소개). update에서는 바꿔 쓰기")
+        a.add_argument("--memo", help="메모 한 줄 덧붙이기(날짜가 붙어요)")
         a.add_argument("--remind", help="알림: 30, 1h, 1h,10m, 1d. 안 주면 알림 없음")
         a.add_argument("--force", action="store_true", help="겹쳐도 진행")
 
@@ -77,13 +97,16 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--until", help="반복 끝 날짜")
     a.add_argument("--count", type=int, help="반복 횟수")
     a.add_argument("--dday", action="store_true", help="브리핑에 D-day 표시")
+    a.add_argument("--todo", action="append", help="할 일 (여러 번 쓸 수 있어요)")
+    a.add_argument("--no-track", action="store_true", help="지난 뒤 결과를 묻지 않기 (생일·기념일 등)")
 
     ls = sub.add_parser("list", help="일정 보기 (기본: 오늘부터 7일)")
     ls.add_argument("--date", help="그날 하루")
     ls.add_argument("--from", dest="start")
     ls.add_argument("--to", dest="end")
     ls.add_argument("--days", type=int, default=7)
-    ls.add_argument("-q", "--query", help="제목·메모 검색어")
+    ls.add_argument("-q", "--query", help="제목·설명 검색어")
+    ls.add_argument("--status", help="그 상태만: 예정, 진행중, 지연됨, 완료, 못함, 취소")
 
     u = sub.add_parser("update", help="일정 수정")
     u.add_argument("id")
@@ -92,9 +115,35 @@ def build_parser() -> argparse.ArgumentParser:
     event_opts(u, False)
     u.add_argument("--no-remind", action="store_true", help="알림 끄기")
     u.add_argument("--dday", action=argparse.BooleanOptionalAction, default=None)
+    u.add_argument("--track", action=argparse.BooleanOptionalAction, default=None, help="지난 뒤 결과 묻기")
     u.add_argument("--series", action="store_true", help="반복 일정 전체에 적용")
 
-    d = sub.add_parser("delete", help="일정 삭제")
+    st = sub.add_parser("status", help="상태 바꾸기: 예정, 진행중, 지연됨, 완료, 못함, 취소")
+    st.add_argument("id")
+    st.add_argument("status")
+    st.add_argument("--note", help="한 줄 사유·결과 (기록에 남아요)")
+    st.add_argument("--start", help="지연됨: 밀린 새 시작 시각")
+    st.add_argument("--end")
+    st.add_argument("--calendar")
+    st.add_argument("--force", action="store_true")
+
+    n = sub.add_parser("note", help="설명·메모·할 일 고치기")
+    n.add_argument("id")
+    n.add_argument("--calendar")
+    n.add_argument("--desc", help="설명 바꿔 쓰기")
+    n.add_argument("--memo", help="메모 한 줄 덧붙이기")
+    n.add_argument("--todo", action="append", help="할 일 추가")
+    n.add_argument("--check", action="append", help="할 일 체크 (번호나 글자 일부)")
+    n.add_argument("--uncheck", action="append", help="할 일 체크 해제")
+    n.add_argument("--remove", action="append", help="할 일 지우기")
+
+    sh = sub.add_parser("show", help="일정 자세히 (설명·할 일·메모·기록)")
+    sh.add_argument("id")
+    sh.add_argument("--calendar")
+
+    sub.add_parser("review", help="결과가 안 남은 지난 일정").add_argument("--days", type=int, default=14)
+
+    d = sub.add_parser("delete", help="일정 삭제 (기록도 사라져요. 남기려면 status 취소)")
     d.add_argument("id")
     d.add_argument("--calendar")
     d.add_argument("--series", action="store_true", help="반복 일정 전체 삭제")
@@ -176,18 +225,33 @@ def run(args) -> object:
 
     match args.cmd:
         case "add":
-            return cal.add(args.title, args.start, args.end, args.minutes, args.location or "", args.memo or "",
-                           args.remind, args.repeat, args.until, args.count, args.dday, args.force)
+            return cal.add(args.title, args.start, end=args.end, minutes=args.minutes, location=args.location or "",
+                           description=args.desc or "", memo=args.memo or "", todos=args.todo, remind=args.remind,
+                           repeat=args.repeat, until=args.until, count=args.count, dday=args.dday,
+                           track=not args.no_track, force=args.force)
         case "list":
             if args.date:
                 start = end = as_date(args.date)
             else:
                 start = as_date(args.start)
                 end = date.fromisoformat(args.end) if args.end else start + timedelta(days=args.days - 1)
-            return cal.agenda(start, end, args.query)
+            return cal.agenda(start, end, args.query, args.status)
         case "update":
-            return cal.update(args.id, args.calendar, args.title, args.start, args.end, args.minutes, args.location,
-                              args.memo, args.remind, args.no_remind, args.dday, args.series, args.force)
+            return cal.update(args.id, args.calendar, title=args.title, start=args.start, end=args.end,
+                              minutes=args.minutes, location=args.location, description=args.desc, memo=args.memo,
+                              remind=args.remind, clear_remind=args.no_remind, dday=args.dday, track=args.track,
+                              series=args.series, force=args.force)
+        case "status":
+            return cal.set_status(args.id, args.status, note=args.note, start=args.start, end=args.end,
+                                  calendar_id=args.calendar, force=args.force)
+        case "note":
+            return cal.edit_notes(args.id, args.calendar, description=args.desc, memo=args.memo, add_todos=args.todo,
+                                  check=args.check, uncheck=args.uncheck, remove_todos=args.remove)
+        case "show":
+            return cal.get(args.id, args.calendar)
+        case "review":
+            found = cal.review(args.days)
+            return {"events": [e.to_dict() for e in found], "message": "" if found else "정리할 지난 일정이 없어요."}
         case "delete":
             return cal.delete(args.id, args.calendar, args.series)
         case "conflicts":

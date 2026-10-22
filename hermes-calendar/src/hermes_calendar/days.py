@@ -87,7 +87,8 @@ class Days:
         for cal in self.cfg.calendars():
             for ev in self.gcal.events(cal, start, end):
                 title = ev.get("summary", "")
-                if "date" not in ev.get("start", {}) or not any(k in title for k in keywords):
+                cancelled = ev.get("extendedProperties", {}).get("private", {}).get("hcal_status") == "cancelled"
+                if cancelled or "date" not in ev.get("start", {}) or not any(k in title for k in keywords):
                     continue
                 d, last = date.fromisoformat(ev["start"]["date"]), date.fromisoformat(ev["end"]["date"])
                 while d < last:

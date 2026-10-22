@@ -145,14 +145,14 @@ def test_add_without_remind_has_no_alarm_anywhere(g):
     r = make(g).add("점심", "2026-10-23 12:00")
     body = g.store[HERMES][r["event"]["id"]]
     assert body["reminders"] == {"useDefault": False, "overrides": []}
-    assert "extendedProperties" not in body
+    assert body["extendedProperties"]["private"] == {"hcal_status": "planned"}
     assert r["event"]["remind_minutes"] == []
 
 
 def test_add_with_remind_and_dday(g):
     r = make(g).add("시험", "2026-11-21", remind="1d", dday=True)
     props = g.store[HERMES][r["event"]["id"]]["extendedProperties"]["private"]
-    assert props == {"hcal_remind": "1440", "hcal_has_remind": "1", "hcal_dday": "1"}
+    assert props == {"hcal_status": "planned", "hcal_remind": "1440", "hcal_has_remind": "1", "hcal_dday": "1"}
 
 
 def test_all_day_end_is_inclusive_and_holiday_note(g):
@@ -310,3 +310,171 @@ def test_install_hermes_writes_skill_and_scripts(monkeypatch, tmp_path, capsys):
     script = (tmp_path / "h/scripts/hcal_remind.py").read_text(encoding="utf-8")
     assert "main(['remind'])" in script and str(tmp_path / "hcal") in script
     assert "--no-agent --script hcal_brief.py" in capsys.readouterr().out
+
+
+# ---- 설명·메모·할 일·기록 ----
+
+from hermes_calendar.notes import Notes  # noqa: E402
+
+
+def test_notes_round_trip_and_loose_parsing():
+    n = Notes.parse("사랑니 상담\n\n[할 일]\n☑ 보험증\n- [ ] 예약\n[x] 서류\n그냥 줄\n\n[메모]\n10/21 사진\n\n[기록]\n10/20 09:00 등록")
+    assert n.description == "사랑니 상담"
+    assert [(t.text, t.done) for t in n.todos] == [("보험증", True), ("예약", False), ("서류", True), ("그냥 줄", False)]
+    assert n.memos == ["10/21 사진"] and n.history == ["10/20 09:00 등록"]
+    assert Notes.parse(n.render()) == n
+
+
+def test_notes_from_google_web_html():
+    n = Notes.parse("설명입니다<br><br>[할 일]<br>☐ 우산 &amp; 물<br>☑ 표")
+    assert n.description == "설명입니다" and [t.text for t in n.todos] == ["우산 & 물", "표"]
+
+
+def test_plain_description_without_sections_is_kept():
+    assert Notes.parse("회사 앱에서 쓴 설명").description == "회사 앱에서 쓴 설명"
+
+
+def test_add_with_description_todos_memo(g):
+    ev = make(g).add("치과", "2026-10-23 15:00", description="사랑니 상담", todos=["보험증", "예약 잡기"], memo="첫 방문")["event"]
+    assert ev["description"] == "사랑니 상담"
+    assert ev["todos"] == [{"no": 1, "text": "보험증", "done": False}, {"no": 2, "text": "예약 잡기", "done": False}]
+    assert ev["memos"] == ["10/22 첫 방문"] and ev["history"] == ["10/22 08:30 등록"]
+    assert ev["status"] == "planned"
+
+
+def test_edit_notes(g):
+    cal = make(g)
+    ev = cal.add("여행", "2026-10-30", todos=["여권", "환전", "충전기"])["event"]
+    out = cal.edit_notes(ev["id"], check=["1", "환전"], remove_todos=["충전기"], add_todos=["우산"],
+                         memo="숙소 체크인 3시", description="부산 1박")["event"]
+    assert [(t["text"], t["done"]) for t in out["todos"]] == [("여권", True), ("환전", True), ("우산", False)]
+    assert out["memos"] == ["10/22 숙소 체크인 3시"] and out["description"] == "부산 1박"
+    assert cal.edit_notes(ev["id"], uncheck=["여권"])["event"]["todos"][0]["done"] is False
+    with pytest.raises(UserError):
+        cal.edit_notes(ev["id"], check=["없는 항목"])
+
+
+# ---- 상태·기록 ----
+
+def test_status_done_marks_title_and_logs(g):
+    cal = make(g, "2026-10-23 16:40")
+    ev = cal.add("치과", "2026-10-23 15:00")["event"]
+    out = cal.set_status(ev["id"], "완료", note="다음 진료 11/6")["event"]
+    assert out["status"] == "done" and out["title"] == "치과"
+    assert g.store[HERMES][ev["id"]]["summary"] == "✅ 치과"
+    assert out["history"][-1] == "10/23 16:40 완료 · 다음 진료 11/6"
+    assert cal.set_status(ev["id"], "못함")["event"]["title"] == "치과"
+    assert g.store[HERMES][ev["id"]]["summary"] == "❗ 치과"
+
+
+def test_delayed_moves_event_and_logs_both_times(g):
+    cal = make(g, "2026-10-23 14:50")
+    ev = cal.add("미팅", "2026-10-23 15:00", minutes=90)["event"]
+    out = cal.set_status(ev["id"], "지연", start="2026-10-23 16:00", note="상대 늦음")["event"]
+    assert out["status"] == "delayed" and out["end"].startswith("2026-10-23T17:30")
+    assert out["history"][-1] == "10/23 14:50 지연 10/23(금) 15:00–16:30 → 10/23(금) 16:00–17:30 · 상대 늦음"
+    assert g.store[HERMES][ev["id"]]["summary"] == "⏳ 미팅"
+
+
+def test_planned_change_is_logged_differently(g):
+    cal = make(g)
+    ev = cal.add("치과", "2026-10-23 15:00")["event"]
+    out = cal.update(ev["id"], start="2026-10-24 11:00")["event"]
+    assert out["history"][-1] == "10/22 08:30 시간 변경 10/23(금) 15:00–16:00 → 10/24(토) 11:00–12:00"
+    assert out["status"] == "planned"
+
+
+def test_cancelled_frees_the_slot_and_can_be_restored(g):
+    cal = make(g)
+    ev = cal.add("회의", "2026-10-23 15:00")["event"]
+    cal.set_status(ev["id"], "취소", note="상대 사정")
+    assert g.store[HERMES][ev["id"]]["transparency"] == "transparent"
+    assert cal.add("치과", "2026-10-23 15:00")["created"]
+    cal.set_status(ev["id"], "예정")
+    assert g.store[HERMES][ev["id"]]["transparency"] == "opaque"
+    assert g.store[HERMES][ev["id"]]["summary"] == "회의"
+
+
+def test_rename_keeps_status_mark(g):
+    cal = make(g)
+    ev = cal.add("치과", "2026-10-23 15:00")["event"]
+    cal.set_status(ev["id"], "진행중")
+    assert cal.update(ev["id"], title="치과 진료")["event"]["title"] == "치과 진료"
+    assert g.store[HERMES][ev["id"]]["summary"] == "▶️ 치과 진료"
+
+
+def test_bad_status(g):
+    cal = make(g)
+    ev = cal.add("치과", "2026-10-23 15:00")["event"]
+    with pytest.raises(UserError):
+        cal.set_status(ev["id"], "보류")
+
+
+def test_review_lists_only_unfinished_tracked_past_events(g):
+    cal = make(g, "2026-10-20 09:00")
+    done = cal.add("헬스", "2026-10-21 07:00")["event"]
+    cal.add("치과", "2026-10-21 15:00")
+    cal.add("엄마 생일", "2026-10-21", track=False)
+    cal.add("연차", "2026-10-21")
+    g.insert(PRIMARY, timed("회사 회의", "2026-10-21 10:00"))
+    later = make(g, "2026-10-22 08:30")
+    later.set_status(done["id"], "완료")
+    assert [e.title for e in later.review()] == ["치과"]
+    assert "📝 결과가 안 남은 지난 일정 1개" in later.brief()
+
+
+def test_agenda_status_filter_and_counts(g):
+    cal = make(g)
+    a = cal.add("A", "2026-10-22 10:00")["event"]
+    cal.add("B", "2026-10-22 12:00")
+    cal.set_status(a["id"], "완료")
+    out = cal.agenda(date(2026, 10, 22), date(2026, 10, 22))
+    assert out["counts"] == {"예정": 1, "완료": 1}
+    assert [e["title"] for e in cal.agenda(date(2026, 10, 22), date(2026, 10, 22), status="완료")["events"]] == ["A"]
+
+
+def test_remind_skips_finished_and_lists_open_todos(g, tmp_path):
+    cal = make(g, "2026-10-22 08:00", tmp_path)
+    a = cal.add("치과", "2026-10-22 15:00", remind="30", todos=["보험증", "칫솔"])["event"]
+    b = cal.add("회의", "2026-10-22 15:00", remind="30", force=True)["event"]
+    cal.edit_notes(a["id"], check=["칫솔"])
+    cal.set_status(b["id"], "취소")
+    msg = make(g, "2026-10-22 14:31", tmp_path).remind()
+    assert msg == "⏰ 15:00 치과 — 29분 후\n  ☐ 보험증"
+
+
+def test_cancelled_leave_is_not_a_day_off(g):
+    cal = make(g)
+    ev = cal.add("연차", "2026-10-28")["event"]
+    assert make(g).days.is_off(date(2026, 10, 28))
+    cal.set_status(ev["id"], "취소")
+    assert not make(g).days.is_off(date(2026, 10, 28))
+
+
+def test_cli_status_note_show(g, monkeypatch, capsys):
+    import hermes_calendar.cli as cli
+
+    monkeypatch.setattr(cli.GCal, "connect", classmethod(lambda cls, home: g))
+    monkeypatch.setattr(cli.config, "load", lambda: config.Config({**config.DEFAULTS, "hermes_calendar_id": HERMES}))
+    assert main(["add", "치과", "--start", "2026-10-23 15:00", "--desc", "사랑니", "--todo", "보험증"]) == 0
+    capsys.readouterr()
+    assert main(["note", "ev1", "--check", "1", "--memo", "사진 다시"]) == 0
+    assert main(["status", "ev1", "완료", "--note", "다음 11/6"]) == 0
+    capsys.readouterr()
+    assert main(["show", "ev1"]) == 0
+    out = capsys.readouterr().out
+    assert "✅ 치과" in out and "상태: 완료" in out and "1. ☑ 보험증" in out and "[기록]" in out and "완료 · 다음 11/6" in out
+
+
+def test_status_change_keeps_remind_and_dday_even_if_google_replaces_the_map(g):
+    cal = make(g)
+    ev = cal.add("시험", "2026-11-21 09:00", remind="1d", dday=True)["event"]
+    real_patch = g.patch
+
+    def replacing_patch(cal_id, event_id, body):  # 구글이 private 묶음을 통째로 바꾸는 경우를 흉내
+        g.store[cal_id][event_id].pop("extendedProperties", None)
+        return real_patch(cal_id, event_id, body)
+
+    g.patch = replacing_patch
+    out = cal.set_status(ev["id"], "진행중")["event"]
+    assert out["remind_minutes"] == [1440] and out["dday"] and out["status"] == "in_progress"
