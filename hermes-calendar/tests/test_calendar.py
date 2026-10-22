@@ -478,3 +478,76 @@ def test_status_change_keeps_remind_and_dday_even_if_google_replaces_the_map(g):
     g.patch = replacing_patch
     out = cal.set_status(ev["id"], "진행중")["event"]
     assert out["remind_minutes"] == [1440] and out["dday"] and out["status"] == "in_progress"
+
+
+# ---- 설치 ----
+
+def test_client_secret_found_in_downloads(monkeypatch, tmp_path):
+    from hermes_calendar import gcal
+
+    monkeypatch.setattr(gcal.Path, "home", classmethod(lambda cls: tmp_path))
+    dl = tmp_path / "Downloads"
+    dl.mkdir()
+    (dl / "client_secret_web.json").write_text('{"web": {}}')  # 웹 앱 유형은 무시
+    assert gcal.find_client_secret() is None
+    (dl / "client_secret_123.apps.googleusercontent.com.json").write_text('{"installed": {"client_id": "x"}}')
+    home = tmp_path / "hcal"
+    assert gcal.get_client_secret(home, open_browser=False) == home / "credentials.json"
+    assert "installed" in (home / "credentials.json").read_text()
+
+
+def test_apply_runs_hermes_commands_and_skips_existing_cron(monkeypatch, tmp_path):
+    import hermes_calendar.cli as cli
+
+    calls = []
+
+    class R:
+        def __init__(self, out="", code=0):
+            self.stdout, self.stderr, self.returncode = out, "", code
+
+    def fake_run(argv, input="", **kw):
+        calls.append((argv[1:], input))
+        if argv[1:3] == ["cron", "list"]:
+            return R("ID  hcal-remind  every 5m")
+        if argv[1:3] == ["config", "get"]:
+            return R("")
+        return R("✓ Saved 'hermes_calendar' (14/14 tools enabled)" if argv[1:3] == ["mcp", "add"] else "ok")
+
+    monkeypatch.setattr(cli, "hermes_exe", lambda: "/bin/hermes")
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    args = cli.build_parser().parse_args(["install-hermes", "--hermes-home", str(tmp_path / "h"), "--apply"])
+    out = cli.install_hermes(args, tmp_path / "hcal")
+    ran = [c[0][:2] for c in calls]
+    assert ran == [["config", "get"], ["config", "set"], ["cron", "list"], ["mcp", "add"], ["cron", "create"], ["gateway", "restart"]]
+    assert calls[1][0] == ["config", "set", "timezone", "Asia/Seoul"]
+    mcp = calls[3]
+    assert mcp[1] == "y\ny\n" and f"HCAL_HOME={tmp_path / 'hcal'}" in mcp[0] and mcp[0][-2:] == ["-m", "hermes_calendar.mcp_server"]
+    assert "--interpreter" in calls[4][0] and "hcal-morning-brief" in calls[4][0]
+    assert "⏭ 직전 알림 크론: 이미 있어요" in out and "✅ MCP 서버 등록" in out and "⚠️" not in out
+
+
+def test_apply_reports_mcp_saved_disabled_as_failure(monkeypatch, tmp_path):
+    import hermes_calendar.cli as cli
+
+    class R:
+        def __init__(self, out):
+            self.stdout, self.stderr, self.returncode = out, "", 0
+
+    def fake_run(argv, input="", **kw):
+        if argv[1:3] == ["mcp", "add"]:
+            return R("✗ Failed to connect: boom\n✓ Saved 'hermes_calendar' to config (disabled)")
+        return R("Asia/Seoul" if argv[1:3] == ["config", "get"] else "")
+
+    monkeypatch.setattr(cli, "hermes_exe", lambda: "/bin/hermes")
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    args = cli.build_parser().parse_args(["install-hermes", "--hermes-home", str(tmp_path / "h"), "--apply"])
+    out = cli.install_hermes(args, tmp_path / "hcal")
+    assert "⚠️ MCP 서버 등록 실패: ✗ Failed to connect: boom" in out and "시간대" not in out
+
+
+def test_apply_without_hermes(monkeypatch, tmp_path):
+    import hermes_calendar.cli as cli
+
+    monkeypatch.setattr(cli, "hermes_exe", lambda: None)
+    args = cli.build_parser().parse_args(["install-hermes", "--hermes-home", str(tmp_path / "h"), "--apply"])
+    assert "hermes 명령을 찾지 못했어요" in cli.install_hermes(args, tmp_path / "hcal")

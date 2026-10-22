@@ -32,70 +32,41 @@
 
 ## 설치
 
-헤르메스가 돌아가는 컴퓨터에서 진행합니다. Python 3.11 이상이 필요합니다.
+헤르메스가 돌아가는 컴퓨터에서 진행합니다. 헤르메스에 텔레그램이 연결돼 있어야 브리핑·알림이 옵니다.
 
-### 1. 내려받고 설치
+### 윈도우
 
-**윈도우 (PowerShell)**
+1. `hermes-calendar` 폴더를 받아서 압축을 풉니다. (GitHub 페이지의 초록색 **Code → Download ZIP**, 또는 Claude가 보내준 zip 파일)
+2. 폴더 안의 **`install.cmd`를 더블클릭**합니다. "Windows의 PC 보호" 창이 나오면 **추가 정보 → 실행**.
+3. 창에 나오는 안내대로 따라 하면 됩니다.
+   - 파이썬이 없으면 자동으로 설치합니다.
+   - 구글 클라우드 화면이 열리면 안내된 5단계를 눌러 파일 하나를 받습니다. 받으면 다운로드 폴더에서 저절로 찾아서 다음으로 넘어갑니다.
+   - 구글 로그인 화면에서 내 계정을 고르고 허용합니다. "Google에서 확인하지 않은 앱"이 나오면 **고급 → (프로젝트 이름)(으)로 이동**. 내가 만든 앱이라 괜찮습니다.
+   - 헤르메스 등록·크론 등록·재시작은 자동입니다.
+4. 텔레그램에서 헤르메스에게 "오늘 일정 알려줘"라고 보내 봅니다.
 
-```powershell
-git clone https://github.com/milestonesc/main.git
-cd main\hermes-calendar
-python -m venv .venv
-.venv\Scripts\pip install .
-```
+중간에 멈추거나 창을 닫았으면 `install.cmd`를 다시 실행하세요. 끝난 단계는 건너뜁니다.
 
-**리눅스·맥**
-
-```bash
-git clone https://github.com/milestonesc/main.git
-cd main/hermes-calendar
-python3 -m venv .venv
-.venv/bin/pip install .
-```
-
-이후 `hcal` 명령은 가상환경 안에 있습니다. 윈도우는 `.venv\Scripts\hcal`, 리눅스·맥은 `.venv/bin/hcal`로 실행하거나, 가상환경을 켠 뒤(`.venv\Scripts\activate` 또는 `source .venv/bin/activate`) `hcal`로 실행하세요.
-
-### 2. 구글 클라우드 준비 (처음 한 번, 10분)
-
-> 헤르메스의 기본 google-workspace 스킬을 이미 설정했다면, 그때 받은 `google_client_secret.json`을 아래 위치에 `credentials.json`이라는 이름으로 복사하고 3단계로 넘어가세요.
-
-1. [console.cloud.google.com](https://console.cloud.google.com)에서 새 프로젝트를 만듭니다 (이름 예: hermes-calendar).
-2. **API 및 서비스 → 라이브러리**에서 **Google Calendar API**를 찾아 **사용**을 누릅니다.
-3. **Google 인증 플랫폼(OAuth 동의 화면)**에서 시작하기: 앱 이름과 내 이메일을 넣고, 대상은 **외부**로 고릅니다.
-4. **대상(Audience)**에서 게시 상태를 **프로덕션(앱 게시)**으로 바꿉니다. *테스트* 상태로 두면 7일마다 로그인이 풀립니다.
-5. **클라이언트 → 클라이언트 만들기**에서 유형 **데스크톱 앱**을 고르고 JSON을 내려받습니다.
-6. 내려받은 파일을 `credentials.json`이라는 이름으로 아래 폴더에 둡니다 (폴더가 없으면 만드세요).
-   - 윈도우: `%LOCALAPPDATA%\hermes\hcal\credentials.json`
-   - 리눅스·맥: `~/.hermes/hcal/credentials.json`
-
-### 3. 구글 로그인
+### 리눅스·맥 (미니PC 등)
 
 ```bash
-hcal setup
+bash install.sh
 ```
 
-브라우저가 열리면 로그인합니다. "Google에서 확인하지 않은 앱" 화면이 나오면 **고급 → (프로젝트 이름)(으)로 이동**을 누르세요. 내가 만든 앱이라 괜찮습니다. 끝나면 구글 캘린더에 'Hermes' 캘린더가 생깁니다.
+화면 없는 서버에서는 구글 로그인 링크가 출력됩니다. 휴대폰이나 다른 PC에서 열고 로그인한 뒤, 열리지 않는 `http://localhost:1/?...` 페이지의 주소를 통째로 복사해 붙여넣으면 됩니다. 구글 클라우드 파일(`client_secret_....json`)은 `~/Downloads/`에 두면 찾아갑니다.
 
-화면 없는 서버라면 `hcal setup --no-browser`: 출력된 링크를 휴대폰이나 다른 PC에서 열고 로그인한 뒤, 열리지 않는 `http://localhost:1/?...` 페이지의 주소를 통째로 복사해 붙여넣으면 됩니다.
+### 직접 하고 싶다면
 
-### 4. 헤르메스에 연결
+설치 스크립트가 하는 일은 이것뿐입니다.
 
 ```bash
-hcal install-hermes
+python -m venv <hcal 폴더>/venv
+<hcal 폴더>/venv/bin/pip install .          # 윈도우: venv\Scripts\pip
+hcal setup                                  # 구글 파일 받기 안내 + 로그인 + 'Hermes' 캘린더 만들기
+hcal install-hermes --apply                 # 헤르메스 스킬·MCP·크론 등록, 재시작
 ```
 
-스킬과 크론 스크립트를 헤르메스 폴더에 넣고, 남은 할 일 세 가지를 출력합니다. 출력된 내용을 그대로 따라 하면 됩니다.
-
-1. 헤르메스 `config.yaml`에 `mcp_servers.hermes_calendar` 블록 붙여넣기
-2. `hermes cron create ...` 두 줄 실행 (08:30 브리핑, 5분마다 알림 확인)
-3. `hermes gateway restart`
-
-브리핑 시간을 바꾸려면 `hcal install-hermes --brief-time "0 7 * * *"`처럼 크론 식을 주세요.
-
-### 5. 확인
-
-텔레그램에서 헤르메스에게 "오늘 일정 알려줘"라고 보내 보세요. 브리핑은 `hermes cron list`에서 job id를 확인한 뒤 `hermes cron run <id>`로 바로 받아볼 수 있습니다.
+`hcal` 폴더는 윈도우 `%LOCALAPPDATA%\hermes\hcal`, 리눅스·맥 `~/.hermes/hcal`입니다. `--apply` 없이 실행하면 헤르메스에 직접 넣을 명령을 보여줍니다. 브리핑 시간은 `--brief-time "0 7 * * *"`처럼 바꿀 수 있습니다.
 
 ## 이렇게 말하면 됩니다
 
@@ -176,9 +147,9 @@ hcal install-hermes
 
 ## 미니PC 등 다른 컴퓨터로 옮길 때
 
-1. 새 컴퓨터에 헤르메스와 이 도구를 설치합니다 (설치 1단계).
-2. 예전 컴퓨터의 `hcal` 폴더를 통째로 복사합니다 (`credentials.json`, `token.json`, `config.json`). 리눅스라면 `~/.hermes/hcal/`에 둡니다.
-3. `hcal install-hermes`를 다시 실행하고 출력대로 따라 합니다. 구글 로그인을 다시 할 필요는 없습니다.
+1. 새 컴퓨터에 헤르메스를 설치하고 텔레그램을 연결합니다.
+2. 예전 컴퓨터의 `hcal` 폴더에서 `credentials.json`, `token.json`, `config.json` 세 파일을 새 컴퓨터의 `hcal` 폴더(리눅스 `~/.hermes/hcal/`)로 복사합니다. `venv` 폴더는 복사하지 않습니다.
+3. 새 컴퓨터에서 설치 스크립트(`install.sh` 또는 `install.cmd`)를 실행합니다. 구글 로그인은 건너뜁니다.
 
 ## 명령어
 

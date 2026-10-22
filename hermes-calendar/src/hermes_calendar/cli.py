@@ -2,6 +2,8 @@
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from importlib import resources
@@ -10,7 +12,7 @@ from pathlib import Path
 from . import config
 from .core import STATUSES, Calendar, UserError
 from .days import dday_label, wd
-from .gcal import GCal, NotAuthorized, login
+from .gcal import GCal, NotAuthorized, credentials, login
 
 
 def fmt_event(d: dict) -> str:
@@ -79,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("setup", help="구글 로그인 + 'Hermes' 캘린더 준비")
     s.add_argument("--no-browser", action="store_true", help="화면 없는 서버용 로그인")
+    s.add_argument("--relogin", action="store_true", help="이미 로그인돼 있어도 다시 로그인")
 
     def event_opts(a, new: bool):
         a.add_argument("--start", required=new, help="2026-10-22 15:00 (시각) 또는 2026-10-22 (종일)")
@@ -168,7 +171,67 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--hermes-home", help="기본: $HERMES_HOME, 윈도우 %%LOCALAPPDATA%%\\hermes, 그 외 ~/.hermes")
     h.add_argument("--deliver", default="telegram")
     h.add_argument("--brief-time", default="30 8 * * *", help="브리핑 크론 식 (기본 매일 08:30)")
+    h.add_argument("--apply", action="store_true", help="헤르메스 MCP 등록·크론 등록·재시작까지 자동으로")
     return p
+
+
+def hermes_exe() -> str | None:
+    if exe := shutil.which("hermes"):
+        return exe
+    for name in ("hermes.exe", "hermes.cmd", "hermes.bat"):  # 윈도우 설치 위치
+        if (p := config.hermes_home() / "bin" / name).exists():
+            return str(p)
+    return None
+
+
+def hermes_commands(args, home: Path) -> list[tuple[str, list[str], str]]:
+    """(설명, 헤르메스 인자, 표준입력) 목록. MCP 등록은 덮어쓰기·도구 전체 사용을 y로 답한다."""
+    py = sys.executable
+    return [
+        ("MCP 서버 등록", ["mcp", "add", "hermes_calendar", "--command", py, "--env", f"HCAL_HOME={home}",
+                        "--args", "-m", "hermes_calendar.mcp_server"], "y\ny\n"),
+        ("아침 브리핑 크론", ["cron", "create", args.brief_time, "--no-agent", "--script", "hcal_brief.py",
+                         "--interpreter", py, "--deliver", args.deliver, "--name", "hcal-morning-brief"], ""),
+        ("직전 알림 크론", ["cron", "create", "every 5m", "--no-agent", "--script", "hcal_remind.py",
+                        "--interpreter", py, "--deliver", args.deliver, "--name", "hcal-remind"], ""),
+        ("헤르메스 재시작", ["gateway", "restart"], ""),
+    ]
+
+
+def _ok(label: str, r) -> bool:
+    out = r.stdout + r.stderr
+    if label == "MCP 서버 등록":  # 연결에 실패해도 '꺼진 채 저장'하고 0으로 끝나므로 결과 글로 판단
+        return "tools enabled" in out
+    return r.returncode == 0 and "Failed" not in out
+
+
+def apply_hermes(args, home: Path, timezone: str) -> list[str]:
+    exe = hermes_exe()
+    if not exe:
+        return ["⛔ hermes 명령을 찾지 못했어요. 헤르메스를 설치한 뒤 `hcal install-hermes --apply`를 다시 실행하세요."]
+    run_ = lambda a, stdin="": subprocess.run([exe, *a], input=stdin, capture_output=True, text=True,  # noqa: E731
+                                             encoding="utf-8", errors="replace", timeout=300)
+    out = []
+    # 크론 시각은 헤르메스 시간대 기준. 비어 있으면 컴퓨터 시계를 따르는데, 미니PC 리눅스는 UTC인 경우가 많다
+    if not run_(["config", "get", "timezone"]).stdout.strip():
+        r = run_(["config", "set", "timezone", timezone])
+        out.append(f"{'✅' if r.returncode == 0 else '⚠️'} 헤르메스 시간대 {timezone}")
+    existing = run_(["cron", "list", "--all"]).stdout
+    for label, a, stdin in hermes_commands(args, home):
+        name = a[a.index("--name") + 1] if "--name" in a else None
+        if name and name in existing:
+            out.append(f"⏭ {label}: 이미 있어요 ({name})")
+            continue
+        r = run_(a, stdin)
+        if _ok(label, r):
+            out.append(f"✅ {label}")
+        else:
+            lines = [ln.strip() for ln in (r.stdout + r.stderr).splitlines() if ln.strip()]
+            why = next((ln for ln in lines if "Failed" in ln or "rror" in ln), lines[-1] if lines else "")
+            out.append(f"⚠️ {label} 실패: {why}")
+    if any(x.startswith("⚠️ 헤르메스 재시작") for x in out):
+        out.append("   → 헤르메스를 직접 껐다 켜 주세요.")
+    return out
 
 
 def install_hermes(args, home: Path) -> str:
@@ -185,26 +248,18 @@ def install_hermes(args, home: Path) -> str:
             f"os.environ.setdefault('HCAL_HOME', {str(home)!r})\n"
             "from hermes_calendar.cli import main\n"
             f"sys.exit(main([{cmd!r}]))\n", encoding="utf-8")
-    py = sys.executable
-    return f"""✅ 스킬: {skill_dir / 'SKILL.md'}
-✅ 크론 스크립트: {scripts / 'hcal_brief.py'}, {scripts / 'hcal_remind.py'}
+    done = [f"✅ 스킬: {skill_dir / 'SKILL.md'}", f"✅ 크론 스크립트: {scripts / 'hcal_brief.py'}, {scripts / 'hcal_remind.py'}"]
+    if args.apply:
+        done += apply_hermes(args, home, config.load()["timezone"])
+        return "\n".join(done + ["", "끝! 텔레그램에서 헤르메스에게 \"오늘 일정 알려줘\"라고 보내 보세요."])
+    manual = "\n".join("hermes " + " ".join(f'"{x}"' if " " in x or "\\" in x else x for x in a)
+                       for _, a, _ in hermes_commands(args, home))
+    return "\n".join(done) + f"""
 
-1) {hh / 'config.yaml'} 에 아래를 추가하세요 (이미 mcp_servers: 가 있으면 그 아래에 hermes_calendar 부분만):
+남은 일: 아래 명령을 차례로 실행하세요 (또는 `hcal install-hermes --apply`로 자동 실행).
+MCP 등록 중 'Enable all tools?'가 나오면 Enter를 누르세요.
 
-mcp_servers:
-  hermes_calendar:
-    command: '{py}'
-    args: ['-m', 'hermes_calendar.mcp_server']
-    env:
-      HCAL_HOME: '{home}'
-
-2) 크론 두 개를 등록하세요 (LLM을 쓰지 않아 비용 없음):
-
-hermes cron create "{args.brief_time}" --no-agent --script hcal_brief.py --interpreter "{py}" --deliver {args.deliver} --name hcal-morning-brief
-hermes cron create "every 5m" --no-agent --script hcal_remind.py --interpreter "{py}" --deliver {args.deliver} --name hcal-remind
-
-3) 헤르메스를 다시 시작하세요: hermes gateway restart
-4) 확인: hermes cron run <브리핑 job id>"""
+{manual}"""
 
 
 def run(args) -> object:
@@ -213,7 +268,13 @@ def run(args) -> object:
     if args.cmd == "install-hermes":
         return install_hermes(args, home)
     if args.cmd == "setup":
-        login(home, args.no_browser)
+        try:
+            if args.relogin:
+                raise NotAuthorized("다시 로그인")
+            credentials(home)
+            print("✅ 이미 구글에 로그인돼 있어요.")
+        except Exception:  # 로그인 전이거나 토큰이 취소·만료됨
+            login(home, args.no_browser)
         g = GCal.connect(home)
         cfg["hermes_calendar_id"] = g.ensure_calendar(cfg["hermes_calendar_name"], cfg["timezone"])
         config.save(cfg)
